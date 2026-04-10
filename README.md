@@ -1,4 +1,5 @@
 # LinkedIn Lead Finder for n8n
+<img width="1907" height="946" alt="image" src="https://github.com/user-attachments/assets/881c7652-dffb-409f-a7a9-d7c48d57874e" />
 
 Generate targeted lead lists from Google Search results, score them with OpenAI, save them to Google Sheets, and send a daily email digest.
 
