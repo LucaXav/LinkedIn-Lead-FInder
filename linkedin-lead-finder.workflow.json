@@ -1,0 +1,622 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1088,
+        -64
+      ],
+      "id": "c090de9c-80f0-4280-a4d6-44c6c63847d0",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-001",
+              "name": "YOUR_EMAIL",
+              "value": "you@example.com",
+              "type": "string"
+            },
+            {
+              "id": "cfg-002",
+              "name": "SEARCH_GOAL",
+              "value": "Find young people (analysts, associates, VPs) working in venture capital in San Francisco",
+              "type": "string"
+            },
+            {
+              "id": "cfg-003",
+              "name": "IDEAL_LEAD_DESCRIPTION",
+              "value": "Analyst, associate, or VP at a VC fund in San Francisco or Bay Area. Ideally early career, interested in early-stage startups.",
+              "type": "string"
+            },
+            {
+              "id": "cfg-004",
+              "name": "SEARCH_QUERIES",
+              "value": "site:linkedin.com/in \"analyst\" \"venture capital\" \"San Francisco\"\nsite:linkedin.com/in \"associate\" \"venture capital\" \"San Francisco Bay Area\"\nsite:linkedin.com/in \"venture capital\" \"VP\" \"San Francisco\"\nsite:linkedin.com/in \"VC\" analyst OR associate \"San Francisco\"\nsite:linkedin.com/in \"Sequoia\" OR \"a16z\" analyst OR associate\nsite:linkedin.com/in \"Andreessen Horowitz\" analyst OR associate\nsite:linkedin.com/in \"General Catalyst\" OR \"Benchmark\" analyst\nsite:linkedin.com/in \"Accel\" OR \"Kleiner Perkins\" associate\nsite:linkedin.com/in \"seed\" investor analyst \"Bay Area\"\nsite:linkedin.com/in \"pre-seed\" investor associate \"San Francisco\"",
+              "type": "string"
+            },
+            {
+              "id": "cfg-005",
+              "name": "SHEET_URL",
+              "value": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -864,
+        -64
+      ],
+      "id": "e3da6829-60f4-45a1-b0cd-9ff7e8cc9bba",
+      "name": "⚙️ CONFIGURE HERE"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate all (query × page) combinations so the loop processes each one.\n// 10 queries × 3 pages = 30 HTTP requests → ~100-120 LinkedIn profiles after filtering.\nconst config = $input.first().json;\nconst queries = (config.SEARCH_QUERIES || '').split('\\n').map(q => q.trim()).filter(Boolean);\nif (!queries.length) throw new Error('No queries found in SEARCH_QUERIES.');\n\nconst pages = [1, 11, 21]; // 3 pages of 10 results each\nconst output = [];\nfor (const q of queries) {\n  for (const start of pages) {\n    output.push({ json: {\n      search: q,\n      start,\n      _email: config.YOUR_EMAIL,\n      _goal: config.SEARCH_GOAL,\n      _ideal: config.IDEAL_LEAD_DESCRIPTION,\n      _sheetUrl: config.SHEET_URL\n    }});\n  }\n}\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        -64
+      ],
+      "id": "527e13ea-2be3-4599-b5a4-d8eeed2c1496",
+      "name": "Build Query + Page List"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -416,
+        -64
+      ],
+      "id": "a334f94c-dd27-4142-87a0-3265be7567e2",
+      "name": "Loop Over Each Search"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract LinkedIn profiles from Google search results.\n// Filters to /in/ URLs only. Pulls name, title, snippet cleanly.\n// Passes config fields forward for AI scoring downstream.\n\nfunction cleanText(t) {\n  return (t || '').replace(/<[^>]+>/g, '').replace(/\\s+/g, ' ').trim();\n}\n\nfunction parseName(title) {\n  // LinkedIn titles are usually: \"First Last - Title | LinkedIn\" or \"First Last | LinkedIn\"\n  const noLinkedIn = title.replace(/\\|?\\s*LinkedIn\\s*/gi, '').trim();\n  const dashIdx = noLinkedIn.search(/\\s[-–—]\\s/);\n  const namePart = dashIdx > 0 ? noLinkedIn.slice(0, dashIdx).trim() : noLinkedIn.split('|')[0].trim();\n  const words = namePart.split(' ').filter(w => w.length > 0);\n  // Validate: name should be 1-4 words, all starting with uppercase\n  if (words.length >= 1 && words.length <= 4 && words.every(w => /^[A-ZÀ-Ö]/.test(w))) {\n    return { firstName: words[0] || '', lastName: words.slice(1).join(' ') || '' };\n  }\n  return { firstName: '', lastName: '' };\n}\n\nfunction parseRoleAndCompany(title) {\n  // \"First Last - Role at Company | LinkedIn\" or \"First Last - Role | Company | LinkedIn\"\n  const noLinkedIn = title.replace(/\\|?\\s*LinkedIn\\s*/gi, '').trim();\n  const dashIdx = noLinkedIn.search(/\\s[-–—]\\s/);\n  if (dashIdx < 0) return { role: '', company: '' };\n  const afterDash = noLinkedIn.slice(dashIdx + 3).trim();\n  // Try \"Role at Company\"\n  const atMatch = afterDash.match(/^(.+?)\\s+at\\s+(.+?)(?:\\s*\\||$)/i);\n  if (atMatch) return { role: atMatch[1].trim(), company: atMatch[2].trim() };\n  // Try \"Role | Company\"\n  const pipeMatch = afterDash.split('|');\n  if (pipeMatch.length >= 2) return { role: pipeMatch[0].trim(), company: pipeMatch[1].trim() };\n  return { role: afterDash.split('|')[0].trim(), company: '' };\n}\n\nconst inJson = $input.first().json;\nconst items = inJson.items || [];\nconst meta = {\n  _email: inJson._email || '',\n  _goal: inJson._goal || '',\n  _ideal: inJson._ideal || '',\n  _sheetUrl: inJson._sheetUrl || ''\n};\n\n// The HTTP node merges the search params into the response — pull them from context\nconst allItems = $input.all();\nlet email = '', goal = '', ideal = '', sheetUrl = '';\nfor (const it of allItems) {\n  if (it.json._email) { email = it.json._email; goal = it.json._goal; ideal = it.json._ideal; sheetUrl = it.json._sheetUrl; break; }\n}\n\nconst output = [];\nfor (const r of items) {\n  const link = (r.link || r.formattedUrl || '').split('?')[0]; // strip query params\n  if (!link.includes('linkedin.com/in/')) continue; // only personal profiles\n\n  const title = cleanText(r.title || r.htmlTitle || '');\n  const snippet = cleanText(r.snippet || r.htmlSnippet || '');\n  if (!title || title.length < 5) continue;\n\n  const { firstName, lastName } = parseName(title);\n  const { role, company } = parseRoleAndCompany(title);\n\n  // Infer location from snippet if possible\n  let location = '';\n  const locMatch = snippet.match(/(?:based in|located in|\\bin\\b)\\s+([A-Z][a-zA-Z ,]+(?:CA|NY|London|Berlin|Bali|Singapore)?)/i)\n    || snippet.match(/(San Francisco(?:\\s+Bay\\s+Area)?|Bay Area|New York|London|Berlin|Bali|Singapore|Austin|Miami|Los Angeles)/i);\n  if (locMatch) location = locMatch[1].trim();\n\n  output.push({ json: {\n    firstName,\n    lastName,\n    role,\n    company,\n    location,\n    linkedIn: link,\n    rawTitle: title,\n    rawSnippet: snippet,\n    _email: email,\n    _goal: goal,\n    _ideal: ideal,\n    _sheetUrl: sheetUrl\n  }});\n}\n\nif (!output.length) return [{ json: { _empty: true } }];\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        64,
+        -64
+      ],
+      "id": "0cf27f81-4398-4045-8158-16df41895f66",
+      "name": "Extract LinkedIn Profiles"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -64
+      ],
+      "id": "c0e7abe8-91cd-437a-9898-80f7418067eb",
+      "name": "Skip Empty Pages"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Batch profiles into groups of 10 to send to OpenAI efficiently.\nconst items = $input.all().filter(i => !i.json._empty);\nif (!items.length) return [{ json: { _empty: true } }];\n\nconst batchSize = 10;\nconst batches = [];\nlet meta = {};\nfor (const it of items) {\n  meta = { _email: it.json._email, _goal: it.json._goal, _ideal: it.json._ideal, _sheetUrl: it.json._sheetUrl };\n}\n\nfor (let i = 0; i < items.length; i += batchSize) {\n  const batch = items.slice(i, i + batchSize).map(it => ({\n    linkedIn: it.json.linkedIn,\n    firstName: it.json.firstName,\n    lastName: it.json.lastName,\n    role: it.json.role,\n    company: it.json.company,\n    location: it.json.location,\n    title: it.json.rawTitle,\n    snippet: it.json.rawSnippet\n  }));\n  batches.push({ json: { batch, ...meta } });\n}\nreturn batches;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        -96
+      ],
+      "id": "3963bffa-b6c9-4681-9735-f1b404ee3e04",
+      "name": "Batch for AI Scoring"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are a lead scoring agent. The user's search goal is:\n{{ $json._goal }}\n\nIdeal lead: {{ $json._ideal }}\n\nYou receive pre-extracted LinkedIn profile data and must score + enrich each one.\nRespond with a valid JSON array only. No markdown, no code fences. Just [ ... ].",
+              "role": "system"
+            },
+            {
+              "content": "=Score each profile below for relevance to the goal: \"{{ $json._goal }}\"\nIdeal lead: \"{{ $json._ideal }}\"\n\nReturn a JSON array. For each profile include:\n- linkedIn: copy exactly from input\n- firstName: copy from input (correct if obviously wrong)\n- lastName: copy from input\n- role: copy from input (correct if obviously wrong)\n- company: copy from input (correct if obviously wrong)\n- location: copy from input\n- roleCategory: short label e.g. \"VC Analyst\", \"VC Associate\", \"Founder\", \"Engineer\", \"Community Builder\", \"Other\"\n- relevanceScore: 0.0–1.0\n    0.9–1.0 = Clearly matches the ideal lead\n    0.7–0.8 = Strong signal, closely related\n    0.5–0.6 = Possible fit, some signal\n    0.3–0.4 = Weak or tangential\n    0.0–0.2 = Not relevant\n    Be strict. Default lower when uncertain.\n- reachOutReason: 1 sentence using their actual name, role, company. E.g. \"Alex is an analyst at Sequoia — perfectly aligned with your goal to connect with early-career VC professionals in SF.\"\n- isJunk: true if no real person info, boilerplate profile, company page, or job listing\n\nProfiles:\n{{ JSON.stringify($json.batch) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        640,
+        -96
+      ],
+      "id": "351f308c-b334-4c58-8b92-cf69e69eeef6",
+      "name": "AI Score + Enrich"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI response, filter junk + low scores, format for Google Sheets.\nconst items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  const r = item.json;\n  let text = r?.message?.content || r?.choices?.[0]?.message?.content || r?.text || '';\n  if (!text) continue;\n\n  text = text.replace(/```json\\s*/gi, '').replace(/```/g, '').trim();\n  let leads = [];\n  try {\n    leads = JSON.parse(text);\n    if (!Array.isArray(leads)) leads = [leads];\n  } catch(e) {\n    const m = text.match(/\\[.*\\]/s);\n    if (m) { try { leads = JSON.parse(m[0]); } catch(e2) { continue; } }\n    else continue;\n  }\n\n  for (const lead of leads) {\n    if (lead.isJunk === true) continue;\n    const score = lead.relevanceScore || 0;\n    if (score < 0.5) continue;\n    if (!lead.linkedIn) continue;\n\n    const url = lead.linkedIn.toLowerCase().replace(/\\/+$/, '');\n    const fn = (lead.firstName || '').toLowerCase().trim();\n    const ln = (lead.lastName || '').toLowerCase().trim();\n    const co = (lead.company || '').toLowerCase().trim();\n\n    output.push({ json: {\n      'First Name': lead.firstName || '',\n      'Last Name': lead.lastName || '',\n      'LinkedIn': lead.linkedIn || '',\n      'Role': lead.role || '',\n      'Company': lead.company || '',\n      'Role Category': lead.roleCategory || 'Other',\n      'Location': lead.location || '',\n      'Relevance Score': score,\n      'Reach Out Reason': lead.reachOutReason || '',\n      'Query Group': '',\n      'Is Duplicate': 'No',\n      'Date Added': new Date().toISOString().split('T')[0],\n      'Dedupe Key': `${fn} ${ln}||${co}||${url}`,\n      '_email': r._email || '',\n      '_goal': r._goal || '',\n      '_sheetUrl': r._sheetUrl || ''\n    }});\n  }\n}\n\nreturn output.length ? output : [{ json: { _empty: true } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        -96
+      ],
+      "id": "cf0e8c8d-a58d-4489-ad82-6ac1a7a7c7ce",
+      "name": "Parse + Filter Leads"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        -96
+      ],
+      "id": "c0473088-ef69-4144-8705-692000d5669c",
+      "name": "Skip Junk"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $json._sheetUrl }}",
+          "mode": "url"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Leads",
+          "mode": "name"
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [
+        1376,
+        -192
+      ],
+      "id": "e738a74f-20b6-4070-835c-b5fc208385cf",
+      "name": "Upsert to Sheet"
+    },
+    {
+      "parameters": {
+        "aggregate": "aggregateAllItemData",
+        "destinationFieldName": "allLeads",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        -192
+      ],
+      "id": "65680946-4afe-4326-870b-0852f28cabb2",
+      "name": "Collect for Email"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json;\nconst all = (data.allLeads || []).filter(l => !l._empty);\nconst meta = all[0] || {};\nconst goal = meta._goal || 'Lead Search';\nconst sendTo = meta._email || 'me';\nconst today = new Date().toLocaleDateString('en-US', { weekday:'long', year:'numeric', month:'long', day:'numeric' });\n\nif (!all.length) {\n  return [{ json: {\n    emailHtml: `<!DOCTYPE html><html><body style=\"font-family:Arial,sans-serif;background:#f5f5f5;padding:20px\"><div style=\"max-width:600px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;text-align:center\"><div style=\"font-size:48px\">✅</div><h2>No New Leads Found</h2><p style=\"color:#64748b\">${today}</p><p style=\"color:#94a3b8;font-size:13px\">All results scored below 0.5 or were already in your sheet.</p></div></body></html>`,\n    subject: 'ℹ️ Lead Engine: No New Leads Today',\n    sendTo\n  }}];\n}\n\nconst top10 = [...all].sort((a,b) => (parseFloat(b['Relevance Score'])||0) - (parseFloat(a['Relevance Score'])||0)).slice(0,10);\nconst total = all.length;\nconst strong = all.filter(l => (parseFloat(l['Relevance Score'])||0) >= 0.7).length;\nconst likely = all.filter(l => { const s=parseFloat(l['Relevance Score'])||0; return s>=0.5 && s<0.7; }).length;\n\nconst badge = s => s>=0.7 ? {bg:'#dcfce7',fg:'#15803d',lbl:'★ Strong'} : {bg:'#fef9c3',fg:'#854d0e',lbl:'◆ Likely'};\n\nconst card = (l, i) => {\n  const name = [l['First Name'],l['Last Name']].filter(Boolean).join(' ') || 'Unknown';\n  const score = parseFloat(l['Relevance Score'])||0;\n  const {bg,fg,lbl} = badge(score);\n  const sub = [l['Role'],l['Company']].filter(Boolean).join(' @ ');\n  const reason = l['Reach Out Reason']||'';\n  return `<div style=\"background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 18px;margin-bottom:10px;position:relative\">\n  <div style=\"position:absolute;top:14px;right:14px;font-size:11px;font-weight:800;color:#cbd5e1\">#${i+1}</div>\n  <div style=\"margin-bottom:4px;padding-right:28px\">\n    ${l['LinkedIn'] ? `<a href=\"${l['LinkedIn']}\" style=\"font-size:15px;font-weight:700;color:#1d4ed8;text-decoration:none\">${name}</a>` : `<span style=\"font-size:15px;font-weight:700\">${name}</span>`}\n    <span style=\"display:inline-block;font-size:10px;font-weight:700;padding:2px 8px;border-radius:20px;margin-left:8px;vertical-align:middle;background:${bg};color:${fg}\">${lbl} ${(score*100).toFixed(0)}%</span>\n  </div>\n  ${sub ? `<div style=\"font-size:13px;color:#374151;margin-bottom:3px\">${sub}</div>` : ''}\n  ${l['Location'] ? `<div style=\"font-size:12px;color:#6b7280;margin-bottom:6px\">📍 ${l['Location']}</div>` : ''}\n  ${reason ? `<div style=\"font-size:12px;background:#eff6ff;border-left:3px solid #3b82f6;padding:8px 10px;border-radius:0 6px 6px 0;color:#1e40af;line-height:1.5\">💡 ${reason}</div>` : ''}\n</div>`;\n};\n\nconst html = `<!DOCTYPE html><html><head><meta charset=\"UTF-8\"></head>\n<body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#f1f5f9;margin:0;padding:20px\">\n<div style=\"max-width:680px;margin:0 auto;background:#fff;border-radius:14px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,.09)\">\n  <div style=\"background:linear-gradient(135deg,#0f172a,#1e3a5f);color:#fff;padding:28px 32px\">\n    <h1 style=\"margin:0 0 4px;font-size:22px;font-weight:800\">🎯 Top ${Math.min(10,top10.length)} Leads</h1>\n    <p style=\"margin:0 0 3px;font-size:13px;opacity:.8;font-style:italic\">${goal}</p>\n    <p style=\"margin:0;font-size:12px;opacity:.55\">${today}</p>\n  </div>\n  <div style=\"display:flex;border-bottom:1px solid #e2e8f0\">\n    <div style=\"flex:1;padding:14px 20px;text-align:center;border-right:1px solid #e2e8f0\"><div style=\"font-size:26px;font-weight:800;color:#0f172a\">${total}</div><div style=\"font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em\">Saved Today</div></div>\n    <div style=\"flex:1;padding:14px 20px;text-align:center;border-right:1px solid #e2e8f0\"><div style=\"font-size:26px;font-weight:800;color:#15803d\">${strong}</div><div style=\"font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em\">★ Strong</div></div>\n    <div style=\"flex:1;padding:14px 20px;text-align:center\"><div style=\"font-size:26px;font-weight:800;color:#854d0e\">${likely}</div><div style=\"font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.05em\">◆ Likely</div></div>\n  </div>\n  <div style=\"padding:20px 32px 8px\">${top10.map(card).join('')}</div>\n  <div style=\"padding:12px 32px 20px;text-align:center;color:#94a3b8;font-size:12px;border-top:1px solid #e2e8f0\">Deduped by LinkedIn URL · GPT-4o-mini scoring · Only ≥0.5 saved</div>\n</div></body></html>`;\n\nconst top = top10[0]||{};\nconst topName = [top['First Name'],top['Last Name']].filter(Boolean).join(' ');\nreturn [{ json: { emailHtml: html, sendTo, subject: `🎯 ${strong} Strong + ${likely} Likely Leads — ${topName||'See inside'} (${new Date().toLocaleDateString('en-US',{month:'short',day:'numeric'})})` } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        -192
+      ],
+      "id": "f4ead2f1-27b9-4dc2-aca1-70d0dace486a",
+      "name": "Format Email"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.sendTo }}",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.emailHtml }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2032,
+        -192
+      ],
+      "id": "53b90d0d-7db4-4197-8753-8eb3254cdc9a",
+      "name": "Send Email Digest"
+    },
+    {
+      "parameters": {
+        "content": "# 🎯 LinkedIn Lead Finder\n**Pre-loaded for:** Young VC professionals in San Francisco\n\n## Setup — 2 minutes\n1. Open **⚙️ CONFIGURE HERE** (the yellow node)\n2. Fill in the 5 fields\n3. Click **Execute Workflow**\n4. Results land in your Sheet + Email\n\n---\n**Volume:** ~100 profiles per run\n10 queries × 3 pages × 10 results = 300 raw hits → ~100 real LinkedIn profiles after filtering\n\n**Works for any search:**\nHacker houses · VC jobs · Hiring engineers · Career networking",
+        "height": 396,
+        "width": 696,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1088,
+        -1392
+      ],
+      "id": "845c5af9-2231-4c3e-aa2b-c2986a794f53",
+      "name": "Intro"
+    },
+    {
+      "parameters": {
+        "content": "## ⚙️ 5 Fields to Fill\n\n**YOUR_EMAIL** — where results are sent\n\n**SEARCH_GOAL** — one sentence describing who you want. The AI uses this to score every result.\n\n**IDEAL_LEAD_DESCRIPTION** — your perfect lead in detail. More specific = better AI scoring.\n\n**SEARCH_QUERIES** — one Google search per line.\nFormat: `site:linkedin.com/in \"keyword\" role OR city`\nAdd up to 20 lines for more volume.\n\n**SHEET_URL** — your Google Sheet URL\n(needs columns: First Name, Last Name, LinkedIn, Role, Company, Role Category, Location, Relevance Score, Reach Out Reason, Query Group, Is Duplicate, Date Added, Dedupe Key)",
+        "height": 396,
+        "width": 796,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -352,
+        -1392
+      ],
+      "id": "b5da66ed-5a16-481f-abc2-a14190be7fdd",
+      "name": "Config Note"
+    },
+    {
+      "parameters": {
+        "content": "## 🔄 Loop Architecture\n\nThis node generates one item per (query × page) combination and feeds them into the loop one at a time.\n\n**10 queries × 3 pages = 30 HTTP calls**\n\nThe loop ensures each request fires sequentially — more reliable than firing them all at once, and avoids rate-limit errors from the Google API.",
+        "height": 284,
+        "width": 700,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -752,
+        -528
+      ],
+      "id": "914e21d9-24c6-4a7d-b55a-345cf9a48c2a",
+      "name": "Loop Note"
+    },
+    {
+      "parameters": {
+        "content": "## 🧹 Profile Extraction\n\nParses each Google result to pull:\n- **Name** from LinkedIn title format\n- **Role + Company** from title\n- **Location** from snippet text\n- **LinkedIn URL** (cleaned, /in/ only)\n\nCompany pages, job listings, and non-LinkedIn URLs are dropped here before hitting the AI — saves cost and improves quality.",
+        "height": 288,
+        "width": 428,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -16,
+        -528
+      ],
+      "id": "cb19f31d-2a69-4a06-9657-449316dd500c",
+      "name": "Extract Note"
+    },
+    {
+      "parameters": {
+        "url": "=https://www.googleapis.com/customsearch/v1?key={{ $env.GOOGLE_CUSTOM_SEARCH_API_KEY }}&cx={{ $env.GOOGLE_CUSTOM_SEARCH_ENGINE_ID }}&q={{ encodeURI($json.search) }}&num=10&start={{ $json.start }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -176,
+        -64
+      ],
+      "id": "d72ec899-bdd6-4135-8154-13240551c360",
+      "name": "Google Custom Search2"
+    },
+    {
+      "parameters": {
+        "content": "## 🤖 AI Scoring (GPT-4o-mini)\n\nProfiles are batched in groups of 10 and sent to the AI, which:\n- Validates and corrects name/role/company\n- Scores 0.0–1.0 against YOUR goal\n- Writes a personalised reach-out reason\n- Flags junk results\n\n**Only profiles scoring ≥ 0.5 are saved.**\nChange this threshold in the Parse node if needed.",
+        "height": 288,
+        "width": 508,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        432,
+        -528
+      ],
+      "id": "9f2216dc-1276-44d7-83ee-3b6a455660e5",
+      "name": "AI Note2"
+    },
+    {
+      "parameters": {
+        "content": "## 📊 Google Sheets\n\nUses **appendOrUpdate** matching on LinkedIn URL.\n\n✅ New lead → added as new row\n✅ Same lead seen again → row updated, not duplicated\n✅ Safe to run daily with no cleanup needed\n\n**Required sheet columns (exact names):**\nFirst Name, Last Name, LinkedIn, Role, Company, Role Category, Location, Relevance Score, Reach Out Reason, Query Group, Is Duplicate, Date Added, Dedupe Key",
+        "height": 292,
+        "width": 684,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        992,
+        -528
+      ],
+      "id": "7ad26542-ad05-4461-a8ce-79a2c7d3096f",
+      "name": "Sheets Note2"
+    },
+    {
+      "parameters": {
+        "content": "## 💡 Query Examples\n\n**Young VC in SF (default)**\n`site:linkedin.com/in \"analyst\" \"venture capital\" \"San Francisco\"`\n\n**Hacker house organizers**\n`site:linkedin.com/in \"hacker house\" founder OR organizer`\n\n**Hiring ML engineers**\n`site:linkedin.com/in \"ML engineer\" \"open to work\" startup`\n\n**Career networking**\n`site:linkedin.com/in \"product manager\" Series A startup`\n\n**Founder retreats**\n`site:linkedin.com/in \"founder retreat\" host OR organizer`\n\nTip: Use `site:linkedin.com/in` (with /in/) to target personal profiles only and get cleaner results.",
+        "height": 396,
+        "width": 1528,
+        "color": 7
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1088,
+        -976
+      ],
+      "id": "9deab051-ee6d-40da-9fcc-2dbac78abf3b",
+      "name": "Examples Note2"
+    },
+    {
+      "parameters": {
+        "content": "## 🔑 Google Custom Search Setup\n\nYou need two things: an **API Key** and a **Search Engine ID (cx)**.\n\n---\n\n**Step 1 — Get your API Key**\n1. Go to → https://console.cloud.google.com\n2. Create a new project (or use existing)\n3. Search for **\"Custom Search API\"** and enable it\n4. Go to **Credentials → Create Credentials → API Key**\n5. Copy the key and paste it into the HTTP node URL replacing `key=...`\n\n---\n\n**Step 2 — Get your Search Engine ID (cx)**\n1. Go to → https://programmablesearchengine.google.com\n2. Click **\"Add\"** to create a new search engine\n3. Under **\"Sites to search\"** → type `linkedin.com`\n4. Give it any name, click Create\n5. Click your engine → **\"Customize\"** → copy the **Search Engine ID**\n6. Paste it into the HTTP node URL replacing `cx=...`\n\n---\n\n**Step 3 — Enable \"Search the entire web\"**\n1. In your search engine settings → **\"Basics\"**\n2. Toggle ON **\"Search the entire web\"**\n3. This lets it search all of LinkedIn, not just one page\n\n---\n\n⚠️ **Free tier:** 100 queries/day free\nThis workflow makes 30 queries per run — so you get ~3 free runs/day.\nPaid tier is $5 per 1,000 queries after that.",
+        "height": 816,
+        "width": 684,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        480,
+        -1392
+      ],
+      "id": "77282dac-f507-47e3-8198-910bd815627b",
+      "name": "Google Setup Note"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1104,
+        112
+      ],
+      "id": "8cf160d6-46d6-4e63-b4a9-84255d5f6405",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "⚙️ CONFIGURE HERE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ CONFIGURE HERE": {
+      "main": [
+        [
+          {
+            "node": "Build Query + Page List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Query + Page List": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Each Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Each Search": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Google Custom Search2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract LinkedIn Profiles": {
+      "main": [
+        [
+          {
+            "node": "Skip Empty Pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Empty Pages": {
+      "main": [
+        [
+          {
+            "node": "Batch for AI Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Batch for AI Scoring": {
+      "main": [
+        [
+          {
+            "node": "AI Score + Enrich",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Score + Enrich": {
+      "main": [
+        [
+          {
+            "node": "Parse + Filter Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse + Filter Leads": {
+      "main": [
+        [
+          {
+            "node": "Skip Junk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Junk": {
+      "main": [
+        [
+          {
+            "node": "Upsert to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Collect for Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect for Email": {
+      "main": [
+        [
+          {
+            "node": "Format Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Custom Search2": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Each Search",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract LinkedIn Profiles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
